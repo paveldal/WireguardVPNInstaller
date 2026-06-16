@@ -184,6 +184,26 @@ fi
 [[ -n "${WG_EXIT_ENDPOINT}" ]] || fail "--exit-endpoint is required"
 [[ -n "${WG_EXIT_PUBLIC_KEY}" ]] || fail "--exit-public-key is required"
 
+cleanup_legacy_kill_switch() {
+  local marker="# Multi-hop kill switch for ${CHAIN_INTERFACE}"
+  local backup
+  local tmp_conf
+
+  if grep -Fqx "${marker}" "${CLIENT_CONF}"; then
+    backup="${CLIENT_CONF}.bak.$(date -u +%Y%m%d%H%M%S)"
+    tmp_conf="${CLIENT_CONF}.tmp.$$"
+    cp -p "${CLIENT_CONF}" "${backup}"
+    awk -v marker="${marker}" '
+      $0 == marker {skip=2; next}
+      skip > 0 {skip--; next}
+      {print}
+    ' "${CLIENT_CONF}" > "${tmp_conf}"
+    mv "${tmp_conf}" "${CLIENT_CONF}"
+    chmod 600 "${CLIENT_CONF}"
+    echo "Removed legacy kill-switch lines from ${CLIENT_CONF}; backup: ${backup}"
+  fi
+}
+
 if [[ -f "${CHAIN_CONF}" && "${FORCE}" -ne 1 ]]; then
   fail "${CHAIN_CONF} already exists; use --force to replace it"
 fi
@@ -216,6 +236,8 @@ PersistentKeepalive = ${WG_KEEPALIVE}
 CONF
 chmod 600 "${CHAIN_CONF}"
 
+cleanup_legacy_kill_switch
+
 cat > /etc/sysctl.d/99-wireguard-entry-chain.conf <<SYSCTL
 net.ipv4.ip_forward=1
 SYSCTL
@@ -236,25 +258,38 @@ else
 fi
 
 install_kill_switch() {
-  local marker="# Multi-hop kill switch for ${CHAIN_INTERFACE}"
-  local post_up="PostUp = iptables -I FORWARD 1 -i ${CLIENT_INTERFACE} -s ${WG_CLIENT_CIDR} ! -d ${WG_CLIENT_CIDR} ! -o ${CHAIN_INTERFACE} -j REJECT"
-  local post_down="PostDown = iptables -D FORWARD -i ${CLIENT_INTERFACE} -s ${WG_CLIENT_CIDR} ! -d ${WG_CLIENT_CIDR} ! -o ${CHAIN_INTERFACE} -j REJECT 2>/dev/null || true"
+  local service_name="wireguard-chain-killswitch-${CLIENT_INTERFACE}-${CHAIN_INTERFACE}.service"
+  local service_file="/etc/systemd/system/${service_name}"
+  local iptables_path
+  local sh_path
 
-  if ! grep -Fqx "${marker}" "${CLIENT_CONF}"; then
-    KILL_BACKUP="${CLIENT_CONF}.bak.$(date -u +%Y%m%d%H%M%S)"
-    cp -p "${CLIENT_CONF}" "${KILL_BACKUP}"
-    {
-      echo
-      echo "${marker}"
-      echo "${post_up}"
-      echo "${post_down}"
-    } >> "${CLIENT_CONF}"
-    chmod 600 "${CLIENT_CONF}"
-    echo "Client-facing config backed up before kill-switch edit: ${KILL_BACKUP}"
-  fi
+  cleanup_legacy_kill_switch
 
-  if ! iptables -C FORWARD -i "${CLIENT_INTERFACE}" -s "${WG_CLIENT_CIDR}" ! -d "${WG_CLIENT_CIDR}" ! -o "${CHAIN_INTERFACE}" -j REJECT 2>/dev/null; then
-    iptables -I FORWARD 1 -i "${CLIENT_INTERFACE}" -s "${WG_CLIENT_CIDR}" ! -d "${WG_CLIENT_CIDR}" ! -o "${CHAIN_INTERFACE}" -j REJECT
+  if command -v systemctl >/dev/null 2>&1; then
+    iptables_path="$(command -v iptables)"
+    sh_path="$(command -v sh)"
+    cat > "${service_file}" <<SERVICE
+[Unit]
+Description=WireGuard chain kill-switch (${CLIENT_INTERFACE} to ${CHAIN_INTERFACE})
+Wants=wg-quick@${CLIENT_INTERFACE}.service wg-quick@${CHAIN_INTERFACE}.service
+After=wg-quick@${CLIENT_INTERFACE}.service wg-quick@${CHAIN_INTERFACE}.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=${sh_path} -c '${iptables_path} -C FORWARD -i ${CLIENT_INTERFACE} -s ${WG_CLIENT_CIDR} ! -d ${WG_CLIENT_CIDR} ! -o ${CHAIN_INTERFACE} -j REJECT 2>/dev/null || ${iptables_path} -I FORWARD 1 -i ${CLIENT_INTERFACE} -s ${WG_CLIENT_CIDR} ! -d ${WG_CLIENT_CIDR} ! -o ${CHAIN_INTERFACE} -j REJECT'
+ExecStop=${sh_path} -c '${iptables_path} -D FORWARD -i ${CLIENT_INTERFACE} -s ${WG_CLIENT_CIDR} ! -d ${WG_CLIENT_CIDR} ! -o ${CHAIN_INTERFACE} -j REJECT 2>/dev/null || true'
+
+[Install]
+WantedBy=multi-user.target
+SERVICE
+    systemctl daemon-reload
+    systemctl enable --now "${service_name}"
+    echo "Kill-switch service: ${service_name}"
+  else
+    if ! iptables -C FORWARD -i "${CLIENT_INTERFACE}" -s "${WG_CLIENT_CIDR}" ! -d "${WG_CLIENT_CIDR}" ! -o "${CHAIN_INTERFACE}" -j REJECT 2>/dev/null; then
+      iptables -I FORWARD 1 -i "${CLIENT_INTERFACE}" -s "${WG_CLIENT_CIDR}" ! -d "${WG_CLIENT_CIDR}" ! -o "${CHAIN_INTERFACE}" -j REJECT
+    fi
   fi
 }
 

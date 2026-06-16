@@ -14,6 +14,7 @@ WG_ENTRY_CLIENT_CIDR="${WG_ENTRY_CLIENT_CIDR:-10.8.0.0/24}"
 WG_ENTRY_PUBLIC_KEY="${WG_ENTRY_PUBLIC_KEY:-}"
 WG_ENDPOINT="${WG_ENDPOINT:-}"
 WG_WAN_INTERFACE="${WG_WAN_INTERFACE:-}"
+ALLOW_ENDPOINT_MISMATCH=0
 REPLACE_CLIENT_ROUTE=0
 FORCE=0
 
@@ -32,7 +33,11 @@ Options:
   --entry-ip A.B.C.D     VPS1 tunnel IP. Default: <prefix>.2
   --client-cidr CIDR     Client network behind VPS1. Default: ${WG_ENTRY_CLIENT_CIDR}
   --endpoint HOST        Public IP or DNS of VPS2, printed for VPS1 command.
+  --exit-endpoint HOST   Alias for --endpoint.
+  --exit-port PORT       Alias for --port.
   --wan-interface NAME   Outbound interface for NAT. Auto-detected by default.
+  --allow-endpoint-mismatch
+                         Do not fail if this host's public IP differs from --endpoint.
   --replace-client-route Replace an existing route to the VPS1 client CIDR.
   --force                Backup and replace existing chain config.
   -h, --help             Show this help.
@@ -72,7 +77,7 @@ while [[ $# -gt 0 ]]; do
       WG_ENTRY_PUBLIC_KEY="${2:-}"; shift 2 ;;
     --interface)
       WG_INTERFACE="${2:-}"; shift 2 ;;
-    --port)
+    --port|--exit-port)
       WG_PORT="${2:-}"; shift 2 ;;
     --chain-prefix)
       WG_CHAIN_PREFIX="${2:-}"; WG_EXIT_IPV4="${WG_CHAIN_PREFIX}.1"; WG_ENTRY_IPV4="${WG_CHAIN_PREFIX}.2"; WG_CHAIN_CIDR="${WG_CHAIN_PREFIX}.0/30"; shift 2 ;;
@@ -82,10 +87,12 @@ while [[ $# -gt 0 ]]; do
       WG_ENTRY_IPV4="${2:-}"; shift 2 ;;
     --client-cidr)
       WG_ENTRY_CLIENT_CIDR="${2:-}"; shift 2 ;;
-    --endpoint)
+    --endpoint|--exit-endpoint)
       WG_ENDPOINT="${2:-}"; shift 2 ;;
     --wan-interface)
       WG_WAN_INTERFACE="${2:-}"; shift 2 ;;
+    --allow-endpoint-mismatch)
+      ALLOW_ENDPOINT_MISMATCH=1; shift ;;
     --replace-client-route)
       REPLACE_CLIENT_ROUTE=1; shift ;;
     --force)
@@ -156,6 +163,16 @@ detect_endpoint() {
   ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i=1; i<=NF; i++) if ($i == "src") {print $(i+1); exit}}'
 }
 
+detect_public_ip() {
+  if command -v curl >/dev/null 2>&1; then
+    curl -4 -fsS --max-time 8 https://api.ipify.org && return
+  fi
+  if command -v wget >/dev/null 2>&1; then
+    wget -4 -qO- --timeout=8 https://api.ipify.org && return
+  fi
+  ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i=1; i<=NF; i++) if ($i == "src") {print $(i+1); exit}}'
+}
+
 require_root
 umask 077
 
@@ -171,6 +188,13 @@ WAN_INTERFACE="$(detect_default_iface)"
 
 WG_ENDPOINT="$(detect_endpoint)"
 [[ -n "${WG_ENDPOINT}" ]] || fail "could not detect public endpoint; pass --endpoint"
+
+if [[ "${ALLOW_ENDPOINT_MISMATCH}" -ne 1 && "${WG_ENDPOINT}" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+  CURRENT_PUBLIC_IP="$(detect_public_ip || true)"
+  if [[ -n "${CURRENT_PUBLIC_IP}" && "${CURRENT_PUBLIC_IP}" != "${WG_ENDPOINT}" ]]; then
+    fail "this host public IP appears to be ${CURRENT_PUBLIC_IP}, but --endpoint is ${WG_ENDPOINT}. Run this on the VPS2 host, or pass --allow-endpoint-mismatch if this is intentional."
+  fi
+fi
 
 EXISTING_CLIENT_ROUTE="$(ip -4 route show "${WG_ENTRY_CLIENT_CIDR}" 2>/dev/null | awk 'NR == 1 {print; exit}')"
 if [[ -n "${EXISTING_CLIENT_ROUTE}" && "${EXISTING_CLIENT_ROUTE}" != *" dev ${WG_INTERFACE}"* && "${REPLACE_CLIENT_ROUTE}" -ne 1 ]]; then
