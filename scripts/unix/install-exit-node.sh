@@ -14,6 +14,7 @@ WG_ENTRY_CLIENT_CIDR="${WG_ENTRY_CLIENT_CIDR:-10.8.0.0/24}"
 WG_ENTRY_PUBLIC_KEY="${WG_ENTRY_PUBLIC_KEY:-}"
 WG_ENDPOINT="${WG_ENDPOINT:-}"
 WG_WAN_INTERFACE="${WG_WAN_INTERFACE:-}"
+REPLACE_CLIENT_ROUTE=0
 FORCE=0
 
 usage() {
@@ -32,6 +33,7 @@ Options:
   --client-cidr CIDR     Client network behind VPS1. Default: ${WG_ENTRY_CLIENT_CIDR}
   --endpoint HOST        Public IP or DNS of VPS2, printed for VPS1 command.
   --wan-interface NAME   Outbound interface for NAT. Auto-detected by default.
+  --replace-client-route Replace an existing route to the VPS1 client CIDR.
   --force                Backup and replace existing chain config.
   -h, --help             Show this help.
 USAGE
@@ -84,6 +86,8 @@ while [[ $# -gt 0 ]]; do
       WG_ENDPOINT="${2:-}"; shift 2 ;;
     --wan-interface)
       WG_WAN_INTERFACE="${2:-}"; shift 2 ;;
+    --replace-client-route)
+      REPLACE_CLIENT_ROUTE=1; shift ;;
     --force)
       FORCE=1; shift ;;
     -h|--help)
@@ -168,6 +172,11 @@ WAN_INTERFACE="$(detect_default_iface)"
 WG_ENDPOINT="$(detect_endpoint)"
 [[ -n "${WG_ENDPOINT}" ]] || fail "could not detect public endpoint; pass --endpoint"
 
+EXISTING_CLIENT_ROUTE="$(ip -4 route show "${WG_ENTRY_CLIENT_CIDR}" 2>/dev/null | awk 'NR == 1 {print; exit}')"
+if [[ -n "${EXISTING_CLIENT_ROUTE}" && "${EXISTING_CLIENT_ROUTE}" != *" dev ${WG_INTERFACE}"* && "${REPLACE_CLIENT_ROUTE}" -ne 1 ]]; then
+  fail "route ${WG_ENTRY_CLIENT_CIDR} already exists: ${EXISTING_CLIENT_ROUTE}. This is usually VPS1 or another local VPN. Run this script on VPS2, or pass --replace-client-route if replacing that route is intentional."
+fi
+
 mkdir -p "${KEYS_DIR}"
 chmod 700 "${WG_CONFIG_DIR}" "${KEYS_DIR}"
 
@@ -199,8 +208,9 @@ Address = ${WG_EXIT_IPV4}/30
 ListenPort = ${WG_PORT}
 PrivateKey = ${EXIT_PRIVATE_KEY}
 SaveConfig = false
-PostUp = sysctl -w net.ipv4.ip_forward=1 >/dev/null; iptables -t nat -A POSTROUTING -s ${WG_ENTRY_CLIENT_CIDR} -o ${WAN_INTERFACE} -j MASQUERADE; iptables -t nat -A POSTROUTING -s ${WG_CHAIN_CIDR} -o ${WAN_INTERFACE} -j MASQUERADE; iptables -A FORWARD -i ${WG_INTERFACE} -o ${WAN_INTERFACE} -s ${WG_ENTRY_CLIENT_CIDR} -j ACCEPT; iptables -A FORWARD -i ${WG_INTERFACE} -o ${WAN_INTERFACE} -s ${WG_CHAIN_CIDR} -j ACCEPT; iptables -A FORWARD -i ${WAN_INTERFACE} -o ${WG_INTERFACE} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
-PostDown = iptables -t nat -D POSTROUTING -s ${WG_ENTRY_CLIENT_CIDR} -o ${WAN_INTERFACE} -j MASQUERADE 2>/dev/null || true; iptables -t nat -D POSTROUTING -s ${WG_CHAIN_CIDR} -o ${WAN_INTERFACE} -j MASQUERADE 2>/dev/null || true; iptables -D FORWARD -i ${WG_INTERFACE} -o ${WAN_INTERFACE} -s ${WG_ENTRY_CLIENT_CIDR} -j ACCEPT 2>/dev/null || true; iptables -D FORWARD -i ${WG_INTERFACE} -o ${WAN_INTERFACE} -s ${WG_CHAIN_CIDR} -j ACCEPT 2>/dev/null || true; iptables -D FORWARD -i ${WAN_INTERFACE} -o ${WG_INTERFACE} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+Table = off
+PostUp = sysctl -w net.ipv4.ip_forward=1 >/dev/null; ip route replace ${WG_ENTRY_CLIENT_CIDR} dev ${WG_INTERFACE}; iptables -t nat -A POSTROUTING -s ${WG_ENTRY_CLIENT_CIDR} -o ${WAN_INTERFACE} -j MASQUERADE; iptables -t nat -A POSTROUTING -s ${WG_CHAIN_CIDR} -o ${WAN_INTERFACE} -j MASQUERADE; iptables -A FORWARD -i ${WG_INTERFACE} -o ${WAN_INTERFACE} -s ${WG_ENTRY_CLIENT_CIDR} -j ACCEPT; iptables -A FORWARD -i ${WG_INTERFACE} -o ${WAN_INTERFACE} -s ${WG_CHAIN_CIDR} -j ACCEPT; iptables -A FORWARD -i ${WAN_INTERFACE} -o ${WG_INTERFACE} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+PostDown = ip route del ${WG_ENTRY_CLIENT_CIDR} dev ${WG_INTERFACE} 2>/dev/null || true; iptables -t nat -D POSTROUTING -s ${WG_ENTRY_CLIENT_CIDR} -o ${WAN_INTERFACE} -j MASQUERADE 2>/dev/null || true; iptables -t nat -D POSTROUTING -s ${WG_CHAIN_CIDR} -o ${WAN_INTERFACE} -j MASQUERADE 2>/dev/null || true; iptables -D FORWARD -i ${WG_INTERFACE} -o ${WAN_INTERFACE} -s ${WG_ENTRY_CLIENT_CIDR} -j ACCEPT 2>/dev/null || true; iptables -D FORWARD -i ${WG_INTERFACE} -o ${WAN_INTERFACE} -s ${WG_CHAIN_CIDR} -j ACCEPT 2>/dev/null || true; iptables -D FORWARD -i ${WAN_INTERFACE} -o ${WG_INTERFACE} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
 
 # Entry node: VPS1
 [Peer]
