@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+export PATH="${PATH:-/usr/local/bin:/usr/bin:/bin}:/usr/local/sbin:/usr/sbin:/sbin"
+
 WG_INTERFACE="${WG_INTERFACE:-wg0}"
 WG_PORT="${WG_PORT:-51820}"
 WG_IPV4_PREFIX="${WG_IPV4_PREFIX:-10.8.0}"
