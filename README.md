@@ -19,6 +19,8 @@ scripts/
     add-client.sh
     list-clients.sh
     remove-client.sh
+    configure-entry-chain.sh
+    install-exit-node.sh
   windows/
     install-server.ps1
     add-client.ps1
@@ -80,6 +82,59 @@ sudo scripts/unix/remove-client.sh phone
 
 If the server is behind NAT, always pass `--endpoint` with the public IP or DNS name clients can reach.
 
+## Linux Multi-Hop Chain
+
+Use this when clients should go through two VPS hosts:
+
+```text
+client -> VPS1 entry -> VPS2 exit -> Internet
+```
+
+VPS1 is the normal server created by `install-server.sh`. Clients still connect only to VPS1. VPS2 is the exit node that performs NAT to the real Internet.
+
+Default chain values:
+
+```text
+Client network on VPS1: 10.8.0.0/24
+Chain interface: wg-exit
+Chain network: 10.77.0.0/30
+VPS2 chain IP: 10.77.0.1
+VPS1 chain IP: 10.77.0.2
+VPS2 UDP port: 51821
+```
+
+Workflow:
+
+```bash
+# 1. On VPS1, prepare the VPS1 chain key.
+sudo scripts/unix/configure-entry-chain.sh --prepare
+
+# 2. Copy the printed "Entry public key" to VPS2.
+# On VPS2, install the exit node.
+sudo scripts/unix/install-exit-node.sh --entry-public-key VPS1_ENTRY_PUBLIC_KEY --endpoint VPS2_PUBLIC_IP_OR_DNS
+
+# 3. Copy the printed "Exit public key" back to VPS1.
+# On VPS1, route client traffic through VPS2.
+sudo scripts/unix/configure-entry-chain.sh --exit-endpoint VPS2_PUBLIC_IP_OR_DNS --exit-public-key VPS2_EXIT_PUBLIC_KEY
+```
+
+The VPS1 script uses policy routing, so only traffic from the client VPN network is sent to VPS2. VPS1's own SSH/package manager traffic keeps using the normal VPS1 route.
+
+By default, VPS1 also installs a client egress kill-switch. If the VPS1 -> VPS2 tunnel is down, clients are blocked from falling back to direct VPS1 Internet egress. To allow direct fallback, pass:
+
+```bash
+sudo scripts/unix/configure-entry-chain.sh --exit-endpoint VPS2_PUBLIC_IP_OR_DNS --exit-public-key VPS2_EXIT_PUBLIC_KEY --allow-direct-fallback
+```
+
+Useful checks:
+
+```bash
+sudo wg show
+ip rule
+ip route show table 51821
+sudo iptables -S FORWARD
+```
+
 ## Windows Server Quick Start
 
 Run PowerShell as Administrator:
@@ -134,6 +189,8 @@ sudo scripts/unix/install-server.sh --help
 sudo scripts/unix/add-client.sh --help
 sudo scripts/unix/list-clients.sh
 sudo scripts/unix/remove-client.sh alice
+sudo scripts/unix/configure-entry-chain.sh --help
+sudo scripts/unix/install-exit-node.sh --help
 ```
 
 Windows:
