@@ -15,12 +15,12 @@ This sends Internet traffic through the VPN server. The client's directly connec
 ```text
 scripts/
   unix/
+    wg-lib.sh
+    setup-chain.sh
     install-server.sh
     add-client.sh
     list-clients.sh
     remove-client.sh
-    configure-entry-chain.sh
-    install-exit-node.sh
   windows/
     install-server.ps1
     add-client.ps1
@@ -82,7 +82,7 @@ sudo scripts/unix/remove-client.sh phone
 
 If the server is behind NAT, always pass `--endpoint` with the public IP or DNS name clients can reach.
 
-## Linux Multi-Hop Chain
+## Linux Chained Exit
 
 Use this when clients should go through two VPS hosts:
 
@@ -90,40 +90,51 @@ Use this when clients should go through two VPS hosts:
 client -> VPS1 entry -> VPS2 exit -> Internet
 ```
 
-VPS1 is the normal server created by `install-server.sh`. Clients still connect only to VPS1. VPS2 is the exit node that performs NAT to the real Internet.
+Run this on VPS1. The script connects to VPS2 over SSH, configures both hosts, exchanges only public keys, starts the tunnels, and optionally creates a client config.
 
-Default chain values:
+Example:
+
+```bash
+chmod +x scripts/unix/*.sh
+sudo scripts/unix/setup-chain.sh \
+  --entry-endpoint ENTRY_PUBLIC_IP_OR_DNS \
+  --exit-host root@EXIT_PUBLIC_IP_OR_DNS \
+  --exit-endpoint EXIT_PUBLIC_IP_OR_DNS \
+  --client-name phone \
+  --force
+```
+
+The generated client config connects to VPS1:
+
+```text
+Endpoint = ENTRY_PUBLIC_IP_OR_DNS:51820
+```
+
+Expected client public IP after connecting:
+
+```text
+EXIT_PUBLIC_IP_OR_DNS
+```
+
+Defaults:
 
 ```text
 Client network on VPS1: 10.8.0.0/24
-Chain interface: wg-exit
+Client-facing interface: wg0
+Chain interface: wg-chain
 Chain network: 10.77.0.0/30
 VPS2 chain IP: 10.77.0.1
 VPS1 chain IP: 10.77.0.2
+VPS1 UDP port: 51820
 VPS2 UDP port: 51821
-```
-
-Workflow:
-
-```bash
-# 1. On VPS1, prepare the VPS1 chain key.
-sudo scripts/unix/configure-entry-chain.sh --prepare
-
-# 2. Copy the printed "Entry public key" to VPS2.
-# On VPS2, install the exit node.
-sudo scripts/unix/install-exit-node.sh --entry-public-key VPS1_ENTRY_PUBLIC_KEY --endpoint VPS2_PUBLIC_IP_OR_DNS
-
-# 3. Copy the printed "Exit public key" back to VPS1.
-# On VPS1, route client traffic through VPS2.
-sudo scripts/unix/configure-entry-chain.sh --exit-endpoint VPS2_PUBLIC_IP_OR_DNS --exit-public-key VPS2_EXIT_PUBLIC_KEY
 ```
 
 The VPS1 script uses policy routing, so only traffic from the client VPN network is sent to VPS2. VPS1's own SSH/package manager traffic keeps using the normal VPS1 route.
 
-By default, VPS1 also installs a client egress kill-switch. If the VPS1 -> VPS2 tunnel is down, clients are blocked from falling back to direct VPS1 Internet egress. To allow direct fallback, pass:
+By default, client egress outside the chain is rejected. To allow direct fallback, pass:
 
 ```bash
-sudo scripts/unix/configure-entry-chain.sh --exit-endpoint VPS2_PUBLIC_IP_OR_DNS --exit-public-key VPS2_EXIT_PUBLIC_KEY --allow-direct-fallback
+sudo scripts/unix/setup-chain.sh --entry-endpoint VPS1_PUBLIC_IP_OR_DNS --exit-host root@VPS2_PUBLIC_IP_OR_DNS --exit-endpoint VPS2_PUBLIC_IP_OR_DNS --allow-direct-fallback
 ```
 
 Useful checks:
@@ -186,11 +197,10 @@ Linux:
 
 ```bash
 sudo scripts/unix/install-server.sh --help
+sudo scripts/unix/setup-chain.sh --help
 sudo scripts/unix/add-client.sh --help
 sudo scripts/unix/list-clients.sh
 sudo scripts/unix/remove-client.sh alice
-sudo scripts/unix/configure-entry-chain.sh --help
-sudo scripts/unix/install-exit-node.sh --help
 ```
 
 Windows:
